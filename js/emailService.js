@@ -52,9 +52,9 @@ var EmailService = {
       })
     }).then(function (r) {
       if (r.ok) { showToast('📧 Email sent successfully!', 'success'); }
-      else { r.text().then(function(t){ alert("يوجد مشكلة في الإيميل (Brevo API Error):\n" + t); }); }
-    }).catch(function (e) { alert("Network Error: " + e.message); });
-  },
+  //     else { r.text().then(function(t){ alert("يوجد مشكلة في الإيميل (Brevo API Error):\n" + t); }); }
+  //   }).catch(function (e) { alert("Network Error: " + e.message); });
+  // },
 
   _sendBulk: function (emails, subject, htmlContent) {
     return fetch('https://api.brevo.com/v3/smtp/email', {
