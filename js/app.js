@@ -256,7 +256,7 @@ var App = {
     var unread = App.getUnreadCount();
 
     document.getElementById('header').innerHTML =
-      '<div class="header-left"><button class="menu-toggle" id="menu-toggle">' + icon('menu') + '</button><div class="header-title"><h2>' + page.title + '</h2><p>' + page.sub + '</p></div></div>' +
+      '<div class="header-left"><button class="menu-toggle" id="menu-toggle" style="display:flex !important; position:absolute !important; right:12px !important; z-index:999 !important; background:#6366f1 !important; color:#fff !important; width:44px !important; height:44px !important; border-radius:8px !important; border:none !important;">' + icon('menu') + '</button><div class="header-title"><h2>' + page.title + '</h2><p>' + page.sub + '</p></div></div>' +
       '<div class="header-right"><button class="btn btn-sm btn-outline" id="lang-toggle-btn" style="margin-right:14px">' + (localStorage.getItem('lang') === 'ar' ? 'English' : 'عربي') + '</button><button class="header-btn" id="notif-toggle" title="Notifications">' + icon('bell') +
       '<span class="notif-badge" id="notif-badge" style="display:' + (unread > 0 ? 'flex' : 'none') + '">' + (unread > 9 ? '9+' : unread) + '</span></button></div>';
 
