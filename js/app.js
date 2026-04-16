@@ -40,6 +40,20 @@ var App = {
     App.renderLogin();
   },
 
+  toggleSidebar: function() {
+    var s = document.getElementById('sidebar');
+    var o = document.getElementById('mobile-overlay');
+    if(s) s.classList.toggle('open');
+    if(o) o.classList.toggle('open');
+  },
+
+  closeSidebar: function() {
+    var s = document.getElementById('sidebar');
+    var o = document.getElementById('mobile-overlay');
+    if(s) s.classList.remove('open');
+    if(o) o.classList.remove('open');
+  },
+
   isHR: function() { return App.user && App.user.role === 'hr'; },
   isManager: function() { return App.user && App.user.role === 'manager'; },
 
@@ -121,9 +135,12 @@ var App = {
   renderApp: function() {
     var isHR = App.isHR();
     document.getElementById('app').innerHTML = '<div class="app-layout">' +
+      '<div class="mobile-overlay" id="mobile-overlay"></div>' +
       '<aside class="sidebar" id="sidebar"></aside>' +
       '<div class="main-content"><header class="header" id="header"></header><div class="page-content" id="page-content"></div></div>' +
       '</div><div id="notif-panel-container"></div><div id="modal-container"></div>';
+
+    document.getElementById('mobile-overlay').addEventListener('click', App.closeSidebar);
 
     App.renderSidebar();
     App.renderHeader();
@@ -209,7 +226,7 @@ var App = {
 
     // Bind events
     document.querySelectorAll('.sidebar-item').forEach(function(btn) {
-      btn.addEventListener('click', function() { App.navigate(this.getAttribute('data-page')); });
+      btn.addEventListener('click', function() { App.navigate(this.getAttribute('data-page')); App.closeSidebar(); });
     });
     document.getElementById('logout-btn').addEventListener('click', App.logout);
   },
@@ -239,10 +256,11 @@ var App = {
     var unread = App.getUnreadCount();
 
     document.getElementById('header').innerHTML =
-      '<div class="header-left"><div class="header-title"><h2>' + page.title + '</h2><p>' + page.sub + '</p></div></div>' +
-      '<div class="header-right"><button class="btn btn-sm btn-outline" id="lang-toggle-btn" style="margin-right:14px">' + (localStorage.getItem('lang') === 'ar' ? 'English' : '????') + '</button><button class="header-btn" id="notif-toggle" title="Notifications">' + icon('bell') +
+      '<div class="header-left"><button class="menu-toggle" id="menu-toggle">' + icon('menu') + '</button><div class="header-title"><h2>' + page.title + '</h2><p>' + page.sub + '</p></div></div>' +
+      '<div class="header-right"><button class="btn btn-sm btn-outline" id="lang-toggle-btn" style="margin-right:14px">' + (localStorage.getItem('lang') === 'ar' ? 'English' : 'عربي') + '</button><button class="header-btn" id="notif-toggle" title="Notifications">' + icon('bell') +
       '<span class="notif-badge" id="notif-badge" style="display:' + (unread > 0 ? 'flex' : 'none') + '">' + (unread > 9 ? '9+' : unread) + '</span></button></div>';
 
+    document.getElementById('menu-toggle').addEventListener('click', App.toggleSidebar);
     document.getElementById('notif-toggle').addEventListener('click', function() { App.showNotifPanel(); });
     document.getElementById('lang-toggle-btn').addEventListener('click', function() { var curr = localStorage.getItem('lang'); if (curr === 'ar') { localStorage.setItem('lang', 'en'); document.body.classList.remove('rtl-layout'); } else { localStorage.setItem('lang', 'ar'); document.body.classList.add('rtl-layout'); } window.location.reload(); });
   },
