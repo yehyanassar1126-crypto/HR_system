@@ -180,6 +180,12 @@ const ARABIC_DICT = {
   "Save Record": "حفظ السجل",
   "Salary created!": "تم إصدار الراتب بنجاح!",
 
+  // Specific roles & Factory Positions
+  "hr": "موارد بشرية",
+  "hall manager": "مدير صالة",
+  "department head": "رئيس قسم",
+  "employee": "موظف",
+  
   // Various text nodes
   "Loading Dashboard...": "جاري تحميل لوحة التحكم...",
   "Loading Your Dashboard...": "جاري تحميل بياناتك...",
@@ -204,6 +210,11 @@ const ARABIC_DICT = {
   "Rate Multiplier": "معامل الزيادة",
   "Hours": "عدد الساعات"
 };
+
+// Set Arabic as default language
+if (!localStorage.getItem('lang')) {
+  localStorage.setItem('lang', 'ar');
+}
 
 // Global Translation function
 function t(text) {
