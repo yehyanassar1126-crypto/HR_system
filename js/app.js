@@ -29,7 +29,7 @@ var App = {
       App.loadNotifications();
       App.renderApp();
       // Log login
-      sbClient.from('audit_log').insert({ action: 'LOGIN', user_name: res.data.full_name, details: (res.data.role === 'hr' ? 'HR' : res.data.role === 'manager' ? 'Manager' : 'Employee') + ' user logged in', user_id: res.data.id }).then(function(r) { if(r && r.error) { console.error("Supabase Error:", r.error); alert("DB Error: " + r.error.message); } });
+      sbClient.from('audit_log').insert({ action: 'LOGIN', user_name: res.data.full_name, details: res.data.role.toUpperCase() + ' user logged in', user_id: res.data.id }).then(function(r) { if(r && r.error) { console.error("Supabase Error:", r.error); alert("DB Error: " + r.error.message); } });
     });
   },
 
@@ -54,8 +54,9 @@ var App = {
     if(o) o.classList.remove('open');
   },
 
-  isHR: function() { return App.user && App.user.role === 'hr'; },
-  isManager: function() { return App.user && App.user.role === 'manager'; },
+  isHR: function() { return App.user && ['owner', 'hr manager', 'hr'].indexOf(App.user.role) !== -1; },
+  isManager: function() { return App.user && ['hall manager', 'department head'].indexOf(App.user.role) !== -1; },
+  getRoleLevel: function(r) { return r==='owner'?6 : r==='hr manager'?5 : r==='hr'?4 : r==='hall manager'?3 : r==='department head'?2 : 1; },
 
   showLoginError: function(msg) {
     var el = document.getElementById('login-error');
@@ -103,7 +104,7 @@ var App = {
 
   markAllRead: function() {
     App.notifications = App.notifications.map(function(n) { return Object.assign({}, n, { read: true }); });
-    if (!isDemoMode && App.user) sbClient.from('notifications').update({ read: true }).eq('user_id', App.user.id).then(function(r) { if(r && r.error) { console.error("Supabase Error:", r.error); alert("DB Error: " + r.error.message); } });
+    if (App.user) sbClient.from('notifications').update({ read: true }).eq('user_id', App.user.id).then(function(r) { if(r && r.error) { console.error("Supabase Error:", r.error); alert("DB Error: " + r.error.message); } });
     App.updateNotifBadge();
     App.showNotifPanel();
   },
@@ -181,7 +182,8 @@ var App = {
       menu = [
         { section: 'Overview', items: [{ id: 'dashboard', label: 'My Dashboard', icon: 'layoutDashboard' }] },
         { section: 'Team Management', items: [
-          { id: 'team-adjustments', label: 'Team Adjustments', icon: 'users' },
+          { id: 'employees', label: 'Employees', icon: 'users' },
+          { id: 'team-adjustments', label: 'Team Adjustments', icon: 'fileText' },
         ]},
         { section: 'My Info', items: [
           { id: 'my-attendance', label: 'My Attendance', icon: 'calendarCheck' },
@@ -297,7 +299,7 @@ var App = {
     var el = document.getElementById('page-content');
     switch (App.activePage) {
       case 'dashboard': App.isHR() ? Pages.hrDashboard(el) : Pages.empDashboard(el); break;
-      case 'employees': App.isHR() ? Pages.employees(el) : Pages.empDashboard(el); break;
+      case 'employees': (App.isHR() || App.isManager()) ? Pages.employees(el) : Pages.empDashboard(el); break;
       case 'attendance': case 'my-attendance': Pages.attendance(el); break;
       case 'qr-checkin': Pages.qrCheckin(el); break;
       case 'leaves': case 'my-leaves': Pages.leaves(el); break;
@@ -336,8 +338,17 @@ Pages.hrDashboard = function(el) {
   el.innerHTML = '<div style="padding:60px;text-align:center"><span class="spinner" style="margin-bottom:16px;"></span><p>Loading Dashboard...</p></div>';
 
   var tds = todayStr();
+  var myLevel = App.getRoleLevel(App.user ? App.user.role : 'hr');
+  var allowedRoles = [];
+  if (myLevel >= 6) allowedRoles.push('hr manager', 'hr', 'hall manager', 'department head', 'employee');
+  if (myLevel >= 5) allowedRoles.push('hr', 'hall manager', 'department head', 'employee');
+  if (myLevel >= 4) allowedRoles.push('hall manager', 'department head', 'employee');
+  if (myLevel >= 3) allowedRoles.push('department head', 'employee');
+  if (myLevel >= 2) allowedRoles.push('employee');
+  allowedRoles = allowedRoles.filter(function(item, pos) { return allowedRoles.indexOf(item) === pos; });
+
   Promise.all([
-    sbClient.from('users').select('*').eq('role', 'employee'),
+    sbClient.from('users').select('*').in('role', allowedRoles),
     sbClient.from('attendance').select('*').eq('date', tds),
     sbClient.from('leave_requests').select('*'),
     sbClient.from('overtime').select('*'),
@@ -426,13 +437,15 @@ Pages.empDashboard = function(el) {
 
     var pendingL = myLeaves.filter(function(l) { return l.status === 'pending'; }).length;
     var insurance = calculateInsuranceDuration(user.insurance_start);
-    var shift = SHIFTS[user.shift];
+    var empShiftSystem = user.shift_system || '3-shift';
+    var shift = getShiftConfig(user.shift, empShiftSystem);
     var totalOT = myOvertime.reduce(function(s, o) { return s + o.hours; }, 0);
+    var hasInsurance = user.insurance_start && user.insurance_active;
 
     var html = '<div class="profile-header"><div class="profile-avatar" style="background:' + (user.avatar_color||'#6366f1') + '">' + getInitials(user.full_name) + '</div>' +
       '<div class="profile-info"><h2>Welcome back, ' + user.full_name.split(' ')[0] + '! 👋</h2><div class="profile-meta">' +
       '<span>🏢 ' + user.department + '</span><span>💼 ' + user.position + '</span><span>🆔 ' + user.employee_id + '</span>' +
-      '<span class="shift-badge shift-' + user.shift + '">' + icon('clock', 12) + ' ' + (shift ? shift.label : '') + '</span></div></div></div>';
+      '<span class="shift-badge shift-' + user.shift + '">' + icon('clock', 12) + ' ' + (shift ? shift.label + ' (' + shift.start + '-' + shift.end + ')' : '') + '</span></div></div></div>';
 
     html += '<div class="stats-grid">';
     var attStatus = todayAtt ? (todayAtt.check_out ? 'Completed' : 'Checked In') : 'Not Checked In';
@@ -444,8 +457,12 @@ Pages.empDashboard = function(el) {
     html += '</div>';
 
     html += '<div class="grid-2" style="margin-bottom:24px">';
-    html += '<div class="insurance-card"><div style="display:flex;align-items:center;gap:10px">' + icon('shield', 22) + '<div><h3 style="font-size:1rem;font-weight:700">Insurance Status</h3><p style="font-size:0.8rem;color:var(--text-tertiary)">' + (user.insurance_active ? '✅ Active' : '❌ Inactive') + ' — Started ' + formatDate(user.insurance_start) + '</p></div></div>';
-    html += '<div class="insurance-grid"><div class="insurance-stat"><div class="value">' + insurance.years + '</div><div class="label">Years</div></div><div class="insurance-stat"><div class="value">' + insurance.months + '</div><div class="label">Months</div></div><div class="insurance-stat"><div class="value">' + insurance.days + '</div><div class="label">Days</div></div><div class="insurance-stat"><div class="value">' + insurance.totalDays + '</div><div class="label">Total Days</div></div></div></div>';
+    if (hasInsurance) {
+      html += '<div class="insurance-card"><div style="display:flex;align-items:center;gap:10px">' + icon('shield', 22) + '<div><h3 style="font-size:1rem;font-weight:700">Insurance Status</h3><p style="font-size:0.8rem;color:var(--text-tertiary)">✅ Active — Started ' + formatDate(user.insurance_start) + '</p></div></div>';
+      html += '<div class="insurance-grid"><div class="insurance-stat"><div class="value">' + insurance.years + '</div><div class="label">Years</div></div><div class="insurance-stat"><div class="value">' + insurance.months + '</div><div class="label">Months</div></div><div class="insurance-stat"><div class="value">' + insurance.days + '</div><div class="label">Days</div></div><div class="insurance-stat"><div class="value">' + insurance.totalDays + '</div><div class="label">Total Days</div></div></div></div>';
+    } else {
+      html += '<div style="padding:20px;background:rgba(239,68,68,0.08);border-radius:var(--radius-lg);border:1px solid rgba(239,68,68,0.15)"><div style="display:flex;align-items:center;gap:10px"><span style="font-size:1.5rem">🚫</span><div><h3 style="font-size:1rem;font-weight:700">No Insurance</h3><p style="font-size:0.8rem;color:var(--accent-danger)">Salary divided by 30 working days</p></div></div></div>';
+    }
 
     html += '<div class="card"><div class="card-header"><div><h3>Today\'s Attendance</h3><p>' + formatDate(new Date()) + '</p></div><button class="btn btn-sm btn-primary" onclick="App.navigate(\'qr-checkin\')">QR Check-In ' + icon('arrowRight') + '</button></div><div class="card-body">';
     if (todayAtt) {
@@ -477,31 +494,53 @@ Pages.employees = function(el) {
   var search = '';
   var deptFilter = '';
 
+  var DOC_LIST = [
+    "شهاده الميلاد",
+    "صوره البطاقه",
+    "شهاده المؤهل الدراسي",
+    "شهاده الخدمه العسكريه",
+    "6 صور 4*6",
+    "فيش و تشبيه",
+    "برنت تأمينات (لو جاي من شركه تاني)"
+  ];
+
   function render() {
     var filtered = employees.filter(function(e) {
-      var matchSearch = !search || e.full_name.toLowerCase().indexOf(search.toLowerCase()) !== -1 || e.employee_id.toLowerCase().indexOf(search.toLowerCase()) !== -1;
+      var matchSearch = !search || e.full_name.toLowerCase().indexOf(search.toLowerCase()) !== -1 || (e.employee_id && e.employee_id.toLowerCase().indexOf(search.toLowerCase()) !== -1) || (e.email && e.email.toLowerCase().indexOf(search.toLowerCase()) !== -1);
       var matchDept = !deptFilter || e.department === deptFilter;
       return matchSearch && matchDept;
     });
 
-    var html = '<div class="toolbar"><div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employees..." id="emp-search" value="' + search + '"></div>';
+    var html = '<div class="toolbar"><div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search by name, ID or email..." id="emp-search" value="' + (search || '').replace(/"/g, '&quot;') + '"></div>';
     html += '<select class="filter-select" id="emp-dept-filter"><option value="">All Departments</option>';
     DEPARTMENTS.forEach(function(d) { html += '<option value="' + d + '"' + (deptFilter === d ? ' selected' : '') + '>' + d + '</option>'; });
     html += '</select><button class="btn btn-primary" id="add-emp-btn">' + icon('plus') + ' Add Employee</button></div>';
 
-    html += '<div class="card"><div class="card-header"><div><h3>All Employees</h3><p>' + filtered.length + ' employees found</p></div></div><div class="card-body no-pad"><div class="table-container"><table class="data-table"><thead><tr><th>Employee</th><th>ID</th><th>Department</th><th>Position</th><th>Shift</th><th>Status</th><th>Docs</th><th>Actions</th></tr></thead><tbody>';
+    html += '<div class="card"><div class="card-header"><div><h3>All Employees</h3><p>' + filtered.length + ' employees found</p></div></div><div class="card-body no-pad"><div class="table-container"><table class="data-table"><thead><tr><th>Employee</th><th>ID</th><th>Department</th><th>Position</th><th>Shift System</th><th>Shift</th><th>Status</th><th>Docs</th><th>Actions</th></tr></thead><tbody>';
     filtered.forEach(function(emp) {
-      html += '<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="sidebar-avatar" style="background:' + emp.avatar_color + ';width:32px;height:32px;font-size:0.7rem">' + getInitials(emp.full_name) + '</div><div><div style="color:var(--text-primary);font-weight:600;font-size:0.85rem">' + emp.full_name + '</div><div style="font-size:0.72rem;color:var(--text-muted)">' + emp.email + '</div></div></div></td>';
-      html += '<td><code style="color:var(--accent-primary);font-size:0.78rem">' + emp.employee_id + '</code></td><td>' + emp.department + '</td><td>' + emp.position + '</td>';
-      html += '<td><span class="shift-badge shift-' + emp.shift + '">' + icon('clock', 11) + ' ' + (SHIFTS[emp.shift] ? SHIFTS[emp.shift].label : '') + '</span></td>';
+      var empEmail = emp.email || 'No email';
+      var empShiftSystem = emp.shift_system || '3-shift';
+      var shiftConf = getShiftConfig(emp.shift, empShiftSystem);
+      var sysLabel = empShiftSystem === '2-shift' ? '2-Shift (12h)' : '3-Shift (8h)';
+      html += '<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="sidebar-avatar" style="background:' + (emp.avatar_color||'#6366f1') + ';width:32px;height:32px;font-size:0.7rem">' + getInitials(emp.full_name) + '</div><div><div style="color:var(--text-primary);font-weight:600;font-size:0.85rem">' + emp.full_name + '</div><div style="font-size:0.72rem;color:var(--text-muted)">' + empEmail + '</div></div></div></td>';
+      html += '<td><code style="color:var(--accent-primary);font-size:0.78rem">' + emp.employee_id + '</code></td><td>' + emp.department + '</td><td>' + (emp.position || '—') + '</td>';
+      html += '<td><span class="badge badge-info" style="font-size:0.72rem">' + sysLabel + '</span></td>';
+      html += '<td><span class="shift-badge shift-' + emp.shift + '">' + icon('clock', 11) + ' ' + shiftConf.label + ' (' + shiftConf.start + '-' + shiftConf.end + ')</span></td>';
       html += '<td><span class="badge badge-success"><span class="badge-dot"></span>' + emp.status + '</span></td>';
-      var docsHtml = emp.documents_complete ? '<span class="badge badge-info">' + icon('checkCheck', 12) + ' Complete</span>' : '<button class="btn btn-xs btn-warning" data-doc-complete="' + emp.id + '" title="Mark as complete">?? Missing</button>';
+      var docsHtml = emp.documents_complete ? '<span class="badge badge-info" style="cursor:pointer" data-doc-complete="' + emp.id + '" title="View Documents">' + icon('checkCheck', 12) + ' Complete</span>' : '<button class="btn btn-xs btn-warning" data-doc-complete="' + emp.id + '" title="Manage Documents">?? Missing</button>';
       html += '<td>' + docsHtml + '</td>';
       html += '<td><div style="display:flex;gap:4px"><button class="btn btn-ghost btn-icon" data-view="' + emp.id + '" title="View">' + icon('eye') + '</button><button class="btn btn-ghost btn-icon" data-edit="' + emp.id + '" title="Edit">' + icon('edit') + '</button><button class="btn btn-ghost btn-icon" data-del="' + emp.id + '" title="Delete" style="color:var(--accent-danger)">' + icon('trash') + '</button></div></td></tr>';
     });
-    if (filtered.length === 0) html += '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted)">No employees found</td></tr>';
+    if (filtered.length === 0) html += '<tr><td colspan="9" style="text-align:center;padding:40px;color:var(--text-muted)">No employees found</td></tr>';
     html += '</tbody></table></div></div></div>';
     el.innerHTML = html;
+
+    // Restore focus to search input after re-render
+    var searchEl = document.getElementById('emp-search');
+    if (searchEl && search) {
+      searchEl.focus();
+      searchEl.setSelectionRange(search.length, search.length);
+    }
 
     // Events
     document.getElementById('emp-search').addEventListener('input', function() { search = this.value; render(); });
@@ -519,59 +558,240 @@ Pages.employees = function(el) {
         }
       });
     });
+
+    // Document Checklist
+    document.querySelectorAll('[data-doc-complete]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var id = this.getAttribute('data-doc-complete');
+        var emp = employees.find(function(e) { return e.id === id; });
+        var savedState = {};
+        try { savedState = JSON.parse(localStorage.getItem('doc_state_' + id)) || {}; } catch(e){}
+
+        var body = '<div style="display:flex;flex-direction:column;gap:12px;margin-bottom:16px">';
+        body += '<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-md);margin-bottom:8px"><h4 style="margin:0 0 4px 0;font-size:0.95rem;font-weight:700">الاوراق المطلوبه</h4><p style="margin:0;font-size:0.8rem;color:var(--text-muted)">Check the boxes as the documents are physically submitted.</p></div>';
+        
+        DOC_LIST.forEach(function(doc, idx) {
+          var isChecked = (emp.documents_complete || savedState[idx]) ? 'checked' : '';
+          body += '<label style="display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border-color);border-radius:var(--radius-sm);cursor:pointer;transition:all 0.2s" class="doc-chk-lbl"><input type="checkbox" class="doc-chk" data-idx="'+idx+'" '+isChecked+' style="width:20px;height:20px;accent-color:var(--accent-primary);flex-shrink:0"> <span style="font-weight:600;font-size:0.9rem">'+doc+'</span></label>';
+        });
+        body += '</div>';
+
+        var footer = '<button class="btn btn-outline" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" id="save-docs-btn">Save Status</button>';
+        App.showModal('Required Documents - ' + emp.full_name, body, footer, true);
+
+        // Highlight selected items
+        document.querySelectorAll('.doc-chk').forEach(function(chk) {
+          var updateStyle = function() {
+             var lbl = chk.parentElement;
+             if(chk.checked) { lbl.style.background = 'rgba(99, 102, 241, 0.08)'; lbl.style.borderColor = 'var(--accent-primary)'; }
+             else { lbl.style.background = 'transparent'; lbl.style.borderColor = 'var(--border-color)'; }
+          };
+          chk.addEventListener('change', updateStyle);
+          updateStyle();
+        });
+
+        document.getElementById('save-docs-btn').addEventListener('click', function() {
+          var newState = {};
+          var allChecked = true;
+          document.querySelectorAll('.doc-chk').forEach(function(chk) {
+            newState[chk.getAttribute('data-idx')] = chk.checked;
+            if(!chk.checked) allChecked = false;
+          });
+          localStorage.setItem('doc_state_' + id, JSON.stringify(newState));
+
+          if (allChecked !== emp.documents_complete) {
+            sbClient.from('users').update({ documents_complete: allChecked }).eq('id', id).then(function(r) {
+              if(r && r.error) { alert('Error updating database: ' + r.error.message); return; }
+              emp.documents_complete = allChecked;
+              render();
+              if (allChecked) showToast('All documents submitted!', 'success');
+              else showToast('Document status updated', 'info');
+              App.closeModal();
+            });
+          } else {
+            // Unchanged complete status, just close
+            App.closeModal();
+            showToast('Document checklist saved internally', 'info');
+          }
+        });
+      });
+    });
   }
 
   function showEmpView(id) {
     var emp = employees.find(function(e) { return e.id === id; });
     if (!emp) return;
     var ins = calculateInsuranceDuration(emp.insurance_start);
-    var body = '<div class="profile-header" style="margin-bottom:20px"><div class="profile-avatar" style="background:' + emp.avatar_color + '">' + getInitials(emp.full_name) + '</div><div class="profile-info"><h2>' + emp.full_name + '</h2><div class="profile-meta"><span>🆔 ' + emp.employee_id + '</span><span>🏢 ' + emp.department + '</span><span>💼 ' + emp.position + '</span></div></div></div>';
-    body += '<div class="form-row"><div class="form-field"><label>Email</label><input value="' + emp.email + '" readonly class="form-input" style="padding:10px 14px"></div><div class="form-field"><label>Phone</label><input value="' + emp.phone + '" readonly class="form-input" style="padding:10px 14px"></div></div>';
-    body += '<div class="form-row"><div class="form-field"><label>Hire Date</label><input value="' + formatDate(emp.hire_date) + '" readonly class="form-input" style="padding:10px 14px"></div><div class="form-field"><label>Base Salary</label><input value="EGP ' + (emp.base_salary||0).toLocaleString() + '" readonly class="form-input" style="padding:10px 14px"></div></div>';
-    if (emp.insurance_start) {
+    var empShiftSystem = emp.shift_system || '3-shift';
+    var shiftConf = getShiftConfig(emp.shift, empShiftSystem);
+    var hasInsurance = emp.insurance_start && emp.insurance_active;
+    var body = '<div class="profile-header" style="margin-bottom:20px"><div class="profile-avatar" style="background:' + (emp.avatar_color||'#6366f1') + '">' + getInitials(emp.full_name) + '</div><div class="profile-info"><h2>' + emp.full_name + '</h2><div class="profile-meta"><span>🆔 ' + emp.employee_id + '</span><span>🏢 ' + emp.department + '</span><span>💼 ' + (emp.position||'—') + '</span></div></div></div>';
+    body += '<div class="form-row"><div class="form-field"><label>Email</label><input value="' + (emp.email || 'No email') + '" readonly class="form-input" style="padding:10px 14px"></div><div class="form-field"><label>Phone</label><input value="' + (emp.phone||'—') + '" readonly class="form-input" style="padding:10px 14px"></div></div>';
+    var isDailyView = emp.position && emp.position.indexOf('(عامل يومية)') !== -1;
+    var displayedSalary = isDailyView ? Math.round((emp.base_salary||0) / 30) : (emp.base_salary||0);
+    body += '<div class="form-row"><div class="form-field"><label>Hire Date</label><input value="' + formatDate(emp.hire_date) + '" readonly class="form-input" style="padding:10px 14px"></div><div class="form-field"><label>' + (isDailyView ? 'Daily Wage' : 'Base Salary') + '</label><input value="EGP ' + displayedSalary.toLocaleString() + (isDailyView ? ' / day' : '') + '" readonly class="form-input" style="padding:10px 14px"></div></div>';
+    body += '<div class="form-row"><div class="form-field"><label>Shift System</label><input value="' + (empShiftSystem === '2-shift' ? '2-Shift (12h)' : '3-Shift (8h)') + '" readonly class="form-input" style="padding:10px 14px"></div><div class="form-field"><label>Shift</label><input value="' + shiftConf.label + ' (' + shiftConf.start + ' - ' + shiftConf.end + ')" readonly class="form-input" style="padding:10px 14px"></div></div>';
+    if (hasInsurance) {
       body += '<div class="insurance-card" style="margin-top:16px"><div style="display:flex;align-items:center;gap:8px">' + icon('shield') + '<span style="font-weight:600">Insurance: Active since ' + formatDate(emp.insurance_start) + '</span></div><div class="insurance-grid" style="margin-top:12px"><div class="insurance-stat"><div class="value">' + ins.years + '</div><div class="label">Years</div></div><div class="insurance-stat"><div class="value">' + ins.months + '</div><div class="label">Months</div></div><div class="insurance-stat"><div class="value">' + ins.days + '</div><div class="label">Days</div></div><div class="insurance-stat"><div class="value">' + ins.totalDays + '</div><div class="label">Total Days</div></div></div></div>';
+    } else {
+      body += '<div style="margin-top:16px;padding:16px;background:rgba(239,68,68,0.08);border-radius:var(--radius-md);border:1px solid rgba(239,68,68,0.2);display:flex;align-items:center;gap:10px"><span style="font-size:1.2rem">🚫</span><span style="font-weight:600;color:var(--accent-danger)">No Insurance — Salary divided by 30 days</span></div>';
     }
     App.showModal('Employee Profile', body, '', true);
   }
 
   function showEmpModal(editId) {
     var emp = editId ? employees.find(function(e) { return e.id === editId; }) : null;
-    var body = '<div class="form-row"><div class="form-field"><label>Full Name *</label><input id="ef-name" value="' + (emp ? emp.full_name : '') + '" placeholder="e.g. Ahmed Hassan"></div><div class="form-field"><label>Email *</label><input type="email" id="ef-email" value="' + (emp ? emp.email : '') + '" placeholder="e.g. ahmed@factory.com"></div></div>';
-    body += '<div class="form-row"><div class="form-field"><label>Username</label><input id="ef-username" value="' + (emp ? emp.username : '') + '" placeholder="Login username"></div>';
+    var currentSystem = emp ? (emp.shift_system || '3-shift') : '3-shift';
+    var currentShift = emp ? (emp.shift || 'morning') : 'morning';
+
+    var body = '<div class="form-row"><div class="form-field"><label>Full Name *</label><input id="ef-name" value="' + (emp ? emp.full_name : '') + '" placeholder="e.g. Ahmed Hassan"></div><div class="form-field"><label>Email <span style="color:var(--text-muted);font-size:0.75rem">(optional)</span></label><input type="email" id="ef-email" value="' + (emp ? (emp.email||'') : '') + '" placeholder="e.g. ahmed@factory.com"></div></div>';
+    body += '<div class="form-row"><div class="form-field"><label>Username *</label><input id="ef-username" value="' + (emp ? emp.username : '') + '" placeholder="Login username"></div>';
     if (!emp) { body += '<div class="form-field"><label>Password *</label><input type="password" id="ef-password" placeholder="Login password"></div>'; }
-    else { body += '<div class="form-field"><label>Phone</label><input id="ef-phone" value="' + (emp ? emp.phone : '') + '" placeholder="+20 1xx xxx xxxx"></div>'; }
+    else { body += '<div class="form-field"><label>Phone</label><input id="ef-phone" value="' + (emp ? (emp.phone||'') : '') + '" placeholder="+20 1xx xxx xxxx"></div>'; }
     body += '</div>';
     if (!emp) { body += '<div class="form-row"><div class="form-field"><label>Phone</label><input id="ef-phone" value="" placeholder="+20 1xx xxx xxxx"></div><div></div></div>'; }
-    body += '<div class="form-row"><div class="form-field"><label>Department *</label><select id="ef-dept">';
+    var isDaily = emp && emp.position && emp.position.indexOf('(عامل يومية)') !== -1;
+    var baseVal = emp ? (isDaily ? Math.round(emp.base_salary / 30) : emp.base_salary) : '';
+    var myLevel = App.getRoleLevel(App.user ? App.user.role : 'hr');
+    var roleOptions = '';
+    if (myLevel >= 6) roleOptions += '<option value="hr manager" '+(emp && emp.role==='hr manager'?'selected':'')+'>HR Manager</option>';
+    if (myLevel >= 5) roleOptions += '<option value="hr" '+(emp && emp.role==='hr'?'selected':'')+'>HR</option>';
+    if (myLevel >= 4) roleOptions += '<option value="hall manager" '+(emp && emp.role==='hall manager'?'selected':'')+'>Hall Manager (مدير صالة)</option>';
+    if (myLevel >= 3) roleOptions += '<option value="department head" '+(emp && emp.role==='department head'?'selected':'')+'>Department Head (رئيس قسم)</option>';
+    if (myLevel >= 2) roleOptions += '<option value="employee" '+(!emp || emp.role==='employee'?'selected':'')+'>Employee (موظف)</option>';
+
+    body += '<div class="form-row"><div class="form-field"><label>System Role *</label><select id="ef-role">'+roleOptions+'</select></div><div class="form-field"><label>Department *</label><select id="ef-dept">';
     DEPARTMENTS.forEach(function(d) { body += '<option value="' + d + '"' + (emp && emp.department === d ? ' selected' : '') + '>' + d + '</option>'; });
-    body += '</select></div><div class="form-field"><label>Position</label><input id="ef-pos" value="' + (emp ? emp.position : '') + '" placeholder="Job title"></div></div>';
-    body += '<div class="form-row"><div class="form-field"><label>Base Salary (EGP)</label><input type="number" id="ef-salary" value="' + (emp ? emp.base_salary : '') + '" placeholder="0"></div><div class="form-field"><label>Shift</label><select id="ef-shift">';
-    Object.keys(SHIFTS).forEach(function(k) { body += '<option value="' + k + '"' + (emp && emp.shift === k ? ' selected' : '') + '>' + SHIFTS[k].label + '</option>'; });
-    body += '</select></div></div>';
-    body += '<div class="form-row"><div class="form-field"><label>Hire Date</label><input type="date" id="ef-hire" value="' + (emp ? emp.hire_date : '') + '"></div><div class="form-field"><label>Insurance Start Date</label><input type="date" id="ef-ins" value="' + (emp ? emp.insurance_start : '') + '"></div></div>';
+    body += '</select></div></div><div class="form-row"><div class="form-field"><label>Position</label><input id="ef-pos" value="' + (emp ? (emp.position||'').replace(' (عامل يومية)', '') : '') + '" placeholder="Job title"></div><div></div></div>';
     
+    var canEditSalary = true;
+    if (App.user && App.user.role === 'hr') {
+      var perms = App.user.permissions || {};
+      if (!perms.can_edit_salary) canEditSalary = false;
+    }
+    body += '<div style="margin-bottom:12px"><label style="display:inline-flex;align-items:center;gap:8px;font-weight:600;cursor:pointer"><input type="checkbox" id="ef-is-daily" ' + (isDaily ? 'checked' : '') + ' '+(canEditSalary?'':'disabled')+'> عامل يومية (Daily Worker - Paid per attended day)</label></div>';
+    body += '<div class="form-row"><div class="form-field"><label id="ef-salary-label">' + (isDaily ? 'Daily Wage (EGP) *' : 'Monthly Base Salary (EGP)') + '</label><input type="number" id="ef-salary" value="' + baseVal + '" placeholder="0" '+(canEditSalary?'':'disabled title="Restricted"')+'>' + (!canEditSalary?'<div style="font-size:0.7rem;color:var(--accent-danger);margin-top:4px">Access Restricted</div>':'') + '</div><div class="form-field"><label>Shift System *</label><select id="ef-shift-system">';
+    body += '<option value="2-shift"' + (currentSystem === '2-shift' ? ' selected' : '') + '>2-Shift (12h each)</option>';
+    body += '<option value="3-shift"' + (currentSystem === '3-shift' ? ' selected' : '') + '>3-Shift (8h each)</option>';
+    body += '</select></div></div>';
+    body += '<div class="form-row"><div class="form-field"><label>Shift *</label><select id="ef-shift">';
+    var availableShifts = getShiftsForSystem(currentSystem);
+    availableShifts.forEach(function(s) { body += '<option value="' + s.key + '"' + (currentShift === s.key ? ' selected' : '') + '>' + s.label + '</option>'; });
+    body += '</select></div><div class="form-field"><label>Hire Date</label><input type="date" id="ef-hire" value="' + (emp ? (emp.hire_date||'') : '') + '"></div></div>';
+    body += '<div class="form-row"><div class="form-field"><label>Insurance Start Date <span style="color:var(--text-muted);font-size:0.75rem">(leave blank = no insurance)</span></label><input type="date" id="ef-ins" value="' + (emp ? (emp.insurance_start||'') : '') + '"></div><div></div></div>';
+
+    if (myLevel >= 5) {
+      var p = emp ? (emp.permissions || {}) : {};
+      body += '<div id="hr-permissions-section" style="display:'+(emp && emp.role==='hr'?'block':'none')+';margin-top:16px;margin-bottom:16px;padding:16px;border:1px solid var(--border-color);border-radius:var(--radius-md);background:rgba(99,102,241,0.04)">';
+      body += '<h4 style="margin:0 0 12px 0;font-size:0.9rem;font-weight:700;color:var(--accent-primary)">HR Custom Permissions</h4>';
+      body += '<label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="ef-perm-edit-salary" ' + (p.can_edit_salary ? 'checked' : '') + '> Allow Editing Base Salaries</label>';
+      body += '<label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;cursor:pointer"><input type="checkbox" id="ef-perm-adjust-salary" ' + (p.can_adjust_salary ? 'checked' : '') + '> Allow Issuing Bonuses & Deductions</label>';
+      body += '</div>';
+    }
+
     var footer = '<button class="btn btn-outline" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" id="emp-save-btn">' + (emp ? 'Save Changes' : 'Add Employee') + '</button>';
     App.showModal(emp ? 'Edit Employee' : 'Add New Employee', body, footer, true);
 
+    if (document.getElementById('ef-is-daily')) {
+      document.getElementById('ef-is-daily').addEventListener('change', function() {
+        document.getElementById('ef-salary-label').textContent = this.checked ? 'Daily Wage (EGP) *' : 'Monthly Base Salary (EGP)';
+      });
+    }
+
+    if (myLevel >= 5 && document.getElementById('ef-role')) {
+      var updatePermSection = function() {
+        var sec = document.getElementById('hr-permissions-section');
+        if (!sec) return;
+        sec.style.display = document.getElementById('ef-role').value === 'hr' ? 'block' : 'none';
+      };
+      document.getElementById('ef-role').addEventListener('change', updatePermSection);
+    }
+
+    // Dynamic: when shift system changes, update shift dropdown
+    document.getElementById('ef-shift-system').addEventListener('change', function() {
+      var sys = this.value;
+      var shiftSelect = document.getElementById('ef-shift');
+      var shifts = getShiftsForSystem(sys);
+      shiftSelect.innerHTML = '';
+      shifts.forEach(function(s) {
+        var opt = document.createElement('option');
+        opt.value = s.key;
+        opt.textContent = s.label;
+        shiftSelect.appendChild(opt);
+      });
+    });
+
     document.getElementById('emp-save-btn').addEventListener('click', function() {
-      var form = { full_name: document.getElementById('ef-name').value, email: document.getElementById('ef-email').value, username: document.getElementById('ef-username').value, department: document.getElementById('ef-dept').value, position: document.getElementById('ef-pos').value, phone: document.getElementById('ef-phone').value, base_salary: Number(document.getElementById('ef-salary').value), shift: document.getElementById('ef-shift').value, hire_date: document.getElementById('ef-hire').value, insurance_start: document.getElementById('ef-ins').value , documents_complete: (emp ? emp.documents_complete : false) };
-      if (!form.full_name || !form.email) return;
+      var insVal = document.getElementById('ef-ins').value;
+      var hasInsurance = !!insVal;
+      var dailyChecked = document.getElementById('ef-is-daily') && document.getElementById('ef-is-daily').checked;
+      var rawSalary = Number(document.getElementById('ef-salary').value);
+      var form = {
+        full_name: document.getElementById('ef-name').value,
+        email: document.getElementById('ef-email').value || null,
+        username: document.getElementById('ef-username').value,
+        role: document.getElementById('ef-role') ? document.getElementById('ef-role').value : 'employee',
+        department: document.getElementById('ef-dept').value,
+        position: document.getElementById('ef-pos').value + (dailyChecked ? ' (عامل يومية)' : ''),
+        phone: document.getElementById('ef-phone').value,
+        base_salary: dailyChecked ? (rawSalary * 30) : rawSalary,
+        shift_system: document.getElementById('ef-shift-system').value,
+        shift: document.getElementById('ef-shift').value,
+        hire_date: document.getElementById('ef-hire').value,
+        insurance_start: insVal || null,
+        insurance_active: dailyChecked ? false : hasInsurance,
+        documents_complete: (emp ? emp.documents_complete : false)
+      };
+
+      var canEditSalary = true;
+      if (App.user && App.user.role === 'hr') {
+        var perms = App.user.permissions || {};
+        if (!perms.can_edit_salary) canEditSalary = false;
+      }
+      if (!canEditSalary && emp) {
+        form.base_salary = emp.base_salary;
+        form.position = emp.position; 
+      }
+
+      var ml = App.getRoleLevel(App.user.role);
+      if (form.role === 'hr' && ml >= 5) {
+        form.permissions = {
+          can_edit_salary: document.getElementById('ef-perm-edit-salary') ? document.getElementById('ef-perm-edit-salary').checked : false,
+          can_adjust_salary: document.getElementById('ef-perm-adjust-salary') ? document.getElementById('ef-perm-adjust-salary').checked : false
+        };
+      }
+
+      if (!form.full_name) { alert('Full name is required'); return; }
       if (emp) {
         Object.assign(emp, form);
         sbClient.from('users').update(form).eq('id', emp.id).then(function(r) { if(r && r.error) { console.error("Supabase Error:", r.error); alert("DB Error: " + r.error.message); } });
       } else {
         var passInputValue = document.getElementById('ef-password') ? document.getElementById('ef-password').value : 'emp123';
-        var newEmp = Object.assign({ employee_id: 'EMP-' + String(employees.length + 1).padStart(3, '0'), role: 'employee', insurance_active: true, status: 'active', avatar_color: 'hsl(' + Math.floor(Math.random() * 360) + ',60%,50%)', password_hash: passInputValue }, form);
-        sbClient.from('users').insert([newEmp]).select().single().then(function(r) { if (r.error) { alert('DB Error: ' + r.error.message + (r.error.details ? ' - ' + r.error.details : '')); console.error(r.error); }
-        if (r.data) employees.push(r.data); render(); });
+        if (!form.username) { alert('Username is required'); return; }
+        if (!passInputValue) { alert('Password is required'); return; }
+        var newEmp = Object.assign({ employee_id: 'EMP-' + String(employees.length + 1).padStart(3, '0'), status: 'active', avatar_color: 'hsl(' + Math.floor(Math.random() * 360) + ',60%,50%)', password_hash: passInputValue }, form);
+        sbClient.from('users').insert([newEmp]).select().single().then(function(r) {
+          if (r.error) { alert('DB Error: ' + r.error.message + (r.error.details ? ' - ' + r.error.details : '')); console.error(r.error); return; }
+          if (r.data) { employees.push(r.data); render(); }
+        });
       }
       App.closeModal();
       render();
+      showToast(emp ? 'Employee updated!' : 'Employee added!', 'success');
     });
   }
 
   {
-    sbClient.from('users').select('*').eq('role', 'employee').order('created_at', { ascending: false }).then(function(res) {
+    var myLevel = App.getRoleLevel(App.user ? App.user.role : 'hr');
+    var allowedRoles = [];
+    if (myLevel >= 6) allowedRoles.push('hr manager', 'hr', 'hall manager', 'department head', 'employee');
+    if (myLevel >= 5) allowedRoles.push('hr', 'hall manager', 'department head', 'employee');
+    if (myLevel >= 4) allowedRoles.push('hall manager', 'department head', 'employee');
+    if (myLevel >= 3) allowedRoles.push('department head', 'employee');
+    if (myLevel >= 2) allowedRoles.push('employee');
+    allowedRoles = allowedRoles.filter(function(item, pos) { return allowedRoles.indexOf(item) === pos; });
+
+    sbClient.from('users').select('*').in('role', allowedRoles).order('created_at', { ascending: false }).then(function(res) {
       if (res.data) { employees = res.data; render(); }
     });
   }
@@ -582,12 +802,16 @@ Pages.employees = function(el) {
 Pages.attendance = function(el) {
   var isHR = App.isHR();
   var records = isHR ? [] : [].filter(function(a) { return a.employee_id === App.user.id; });
+  var search = '';
+  var deptFilter = '';
+  var dateFilter = '';
+  var statusFilter = '';
 
   function render(data) {
     var html = '<div class="toolbar">';
-    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search by name..." id="att-search"></div>';
-    if (isHR) { html += '<select class="filter-select" id="att-dept"><option value="">All Departments</option>'; DEPARTMENTS.forEach(function(d) { html += '<option value="' + d + '">' + d + '</option>'; }); html += '</select>'; }
-    html += '<input type="date" class="filter-select" id="att-date"><select class="filter-select" id="att-status"><option value="">All Status</option><option value="present">Present</option><option value="checked_in">Checked In</option><option value="absent">Absent</option></select>';
+    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search by name..." id="att-search" value="' + (search || '').replace(/"/g, '&quot;') + '"></div>';
+    if (isHR) { html += '<select class="filter-select" id="att-dept"><option value="">All Departments</option>'; DEPARTMENTS.forEach(function(d) { html += '<option value="' + d + '"' + (deptFilter === d ? ' selected' : '') + '>' + d + '</option>'; }); html += '</select>'; }
+    html += '<input type="date" class="filter-select" id="att-date" value="' + dateFilter + '"><select class="filter-select" id="att-status"><option value=""' + (statusFilter===''?' selected':'') + '>All Status</option><option value="present"' + (statusFilter==='present'?' selected':'') + '>Present</option><option value="checked_in"' + (statusFilter==='checked_in'?' selected':'') + '>Checked In</option><option value="absent"' + (statusFilter==='absent'?' selected':'') + '>Absent</option></select>';
     html += '<button class="btn btn-outline" id="att-export">' + icon('download') + ' Export</button></div>';
 
     html += '<div class="card"><div class="card-header"><div><h3>' + (isHR ? 'Attendance Records' : 'My Attendance History') + '</h3><p>' + data.length + ' records</p></div></div><div class="card-body no-pad"><div class="table-container"><table class="data-table"><thead><tr>';
@@ -607,17 +831,24 @@ Pages.attendance = function(el) {
     html += '</tbody></table></div></div></div>';
     el.innerHTML = html;
 
+    // Restore focus to search input after re-render
+    var searchEl = document.getElementById('att-search');
+    if (searchEl && search) {
+      searchEl.focus();
+      searchEl.setSelectionRange(search.length, search.length);
+    }
+
     // Filters
     function applyFilters() {
-      var s = document.getElementById('att-search') ? document.getElementById('att-search').value.toLowerCase() : '';
-      var dept = document.getElementById('att-dept') ? document.getElementById('att-dept').value : '';
-      var date = document.getElementById('att-date').value;
-      var status = document.getElementById('att-status').value;
+      search = document.getElementById('att-search') ? document.getElementById('att-search').value.toLowerCase() : '';
+      deptFilter = document.getElementById('att-dept') ? document.getElementById('att-dept').value : '';
+      dateFilter = document.getElementById('att-date').value;
+      statusFilter = document.getElementById('att-status').value;
       var f = records.filter(function(r) {
-        if (s && r.employee_name && r.employee_name.toLowerCase().indexOf(s) === -1) return false;
-        if (dept && r.department !== dept) return false;
-        if (date && r.date !== date) return false;
-        if (status && r.status !== status) return false;
+        if (search && r.employee_name && r.employee_name.toLowerCase().indexOf(search) === -1) return false;
+        if (deptFilter && r.department !== deptFilter) return false;
+        if (dateFilter && r.date !== dateFilter) return false;
+        if (statusFilter && r.status !== statusFilter) return false;
         return true;
       });
       render(f);
@@ -640,8 +871,9 @@ Pages.attendance = function(el) {
 // ----- QR CHECKIN -----
 Pages.qrCheckin = function(el) {
   var user = App.user;
-  var shift = SHIFTS[user.shift];
-  var checkedIn = false, checkedOut = false, checkInTime = null, checkOutTime = null, currentRecordId = null;
+  var empShiftSystem = user.shift_system || '3-shift';
+  var shift = getShiftConfig(user.shift, empShiftSystem);
+  var checkedIn = false, checkedOut = false, checkInTime = null, checkOutTime = null, currentRecordId = null, delayMin = 0;
 
   function renderQR() {
     var now = new Date();
@@ -660,6 +892,11 @@ Pages.qrCheckin = function(el) {
       if (checkedOut) html += '<div style="display:flex;justify-content:space-between;align-items:center"><span style="color:var(--text-tertiary);display:flex;align-items:center;gap:6px">' + icon('logOut', 15) + ' Check Out Time</span><span style="font-weight:700;color:var(--accent-warning)">' + formatTime(checkOutTime) + '</span></div>';
       var workHrs = checkInTime ? (((checkOutTime || new Date()) - checkInTime) / 3600000).toFixed(2) : '0.00';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border-color);padding-top:14px"><span style="color:var(--text-tertiary);display:flex;align-items:center;gap:6px">' + icon('clock', 15) + ' Working Hours</span><span style="font-weight:700;font-size:1.1rem;color:var(--accent-primary-hover)">' + workHrs + 'h</span></div>';
+      if (delayMin > 0) {
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;background:rgba(245,158,11,0.1);padding:12px;border-radius:var(--radius-md);margin-top:4px"><span style="color:var(--accent-warning);display:flex;align-items:center;gap:6px;font-weight:600">' + icon('alertTriangle', 15) + ' Late by</span><span style="font-weight:700;font-size:1.1rem;color:var(--accent-warning)">' + delayMin + ' min</span></div>';
+      } else if (checkedIn) {
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;background:rgba(34,197,94,0.1);padding:12px;border-radius:var(--radius-md);margin-top:4px"><span style="color:var(--accent-success);display:flex;align-items:center;gap:6px;font-weight:600">' + icon('checkCircle', 15) + ' Status</span><span style="font-weight:700;color:var(--accent-success)">On Time \u2705</span></div>';
+      }
       html += '</div></div></div>';
     }
     html += '</div>';
@@ -691,16 +928,43 @@ Pages.qrCheckin = function(el) {
           if (!checkedIn) {
             checkedIn = true;
             checkInTime = timeNow;
+            // Calculate delay: compare check-in time to shift start
+            delayMin = 0;
+            if (shift && shift.start) {
+              var parts = shift.start.split(':');
+              var shiftStart = new Date(timeNow);
+              shiftStart.setHours(parseInt(parts[0]), parseInt(parts[1]), 0, 0);
+              // Handle night shift crossing midnight
+              if (empShiftSystem === '2-shift' && user.shift === 'night') {
+                // Night shift starts at 18:00 - if current time is after midnight, shift started yesterday
+                if (timeNow.getHours() < 12) {
+                  shiftStart.setDate(shiftStart.getDate() - 1);
+                }
+              } else if (user.shift === 'night') {
+                // 3-shift night starts at 22:00 - if current time is after midnight, shift started yesterday
+                if (timeNow.getHours() < 12) {
+                  shiftStart.setDate(shiftStart.getDate() - 1);
+                }
+              }
+              var diffMs = timeNow - shiftStart;
+              if (diffMs > 0) {
+                delayMin = Math.floor(diffMs / 60000);
+              }
+            }
             {
-              sbClient.from('attendance').insert({ employee_id: user.id, employee_name: user.full_name, department: user.department, date: todayStr(), check_in: timeNow.toISOString(), status: 'present' }).select().single().then(function(r) { if (r.error) { alert('DB Error: ' + r.error.message + (r.error.details ? ' - ' + r.error.details : '')); console.error(r.error); }
+              sbClient.from('attendance').insert({ employee_id: user.id, employee_name: user.full_name, department: user.department, date: todayStr(), check_in: timeNow.toISOString(), shift: user.shift, delay_minutes: delayMin, status: 'present' }).select().single().then(function(r) { if (r.error) { alert('DB Error: ' + r.error.message + (r.error.details ? ' - ' + r.error.details : '')); console.error(r.error); }
         if (r.data) currentRecordId = r.data.id; });
             }
-            showToast('✅ Successfully checked in!', 'success');
+            if (delayMin > 0) {
+              showToast('⚠️ Checked in! You are ' + delayMin + ' minutes late.', 'warning');
+            } else {
+              showToast('✅ Successfully checked in! On time!', 'success');
+            }
           } else {
             checkedOut = true;
             checkOutTime = timeNow;
             var diff = ((timeNow - checkInTime) / 3600000).toFixed(2);
-            if (!isDemoMode && currentRecordId) {
+            if (currentRecordId) {
               sbClient.from('attendance').update({ check_out: timeNow.toISOString(), working_hours: Number(diff) }).eq('id', currentRecordId).then(function(r) { if(r && r.error) { console.error("Supabase Error:", r.error); alert("DB Error: " + r.error.message); } });
             }
             showToast('✅ Successfully checked out! Working hours: ' + diff + 'h', 'success');
@@ -728,11 +992,15 @@ Pages.leaves = function(el) {
   var isHR = App.isHR();
   var leaves = isHR ? [] : [].filter(function(l) { return l.employee_id === App.user.id; });
 
+  var search = '';
+  var statusFilter = '';
+  var deptFilter = '';
+
   function render(data) {
     var html = '<div class="toolbar">';
-    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employee..." id="lv-search"></div>';
-    html += '<select class="filter-select" id="lv-status"><option value="">All Status</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>';
-    if (isHR) { html += '<select class="filter-select" id="lv-dept"><option value="">All Departments</option>'; DEPARTMENTS.forEach(function(d) { html += '<option value="' + d + '">' + d + '</option>'; }); html += '</select>'; }
+    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employee..." id="lv-search" value="' + (search||'').replace(/"/g, '&quot;') + '"></div>';
+    html += '<select class="filter-select" id="lv-status"><option value=""' + (statusFilter===''?' selected':'') + '>All Status</option><option value="pending"' + (statusFilter==='pending'?' selected':'') + '>Pending</option><option value="approved"' + (statusFilter==='approved'?' selected':'') + '>Approved</option><option value="rejected"' + (statusFilter==='rejected'?' selected':'') + '>Rejected</option></select>';
+    if (isHR) { html += '<select class="filter-select" id="lv-dept"><option value="">All Departments</option>'; DEPARTMENTS.forEach(function(d) { html += '<option value="' + d + '"' + (deptFilter===d?' selected':'') + '>' + d + '</option>'; }); html += '</select>'; }
     if (!isHR) html += '<button class="btn btn-primary" id="req-leave-btn">' + icon('plus') + ' Request Leave</button>';
     if (isHR) html += '<button class="btn btn-outline" id="lv-export">' + icon('download') + ' Export</button>';
     html += '</div>';
@@ -764,15 +1032,21 @@ Pages.leaves = function(el) {
     html += '</tbody></table></div></div></div>';
     el.innerHTML = html;
 
+    var searchEl = document.getElementById('lv-search');
+    if (searchEl && search) {
+      searchEl.focus();
+      searchEl.setSelectionRange(search.length, search.length);
+    }
+
     // Events
     function applyFilters() {
-      var s = document.getElementById('lv-search') ? document.getElementById('lv-search').value.toLowerCase() : '';
-      var status = document.getElementById('lv-status').value;
-      var dept = document.getElementById('lv-dept') ? document.getElementById('lv-dept').value : '';
+      search = document.getElementById('lv-search') ? document.getElementById('lv-search').value.toLowerCase() : '';
+      statusFilter = document.getElementById('lv-status').value;
+      deptFilter = document.getElementById('lv-dept') ? document.getElementById('lv-dept').value : '';
       var f = leaves.filter(function(l) {
-        if (s && l.employee_name && l.employee_name.toLowerCase().indexOf(s) === -1) return false;
-        if (status && l.status !== status) return false;
-        if (dept && l.department !== dept) return false;
+        if (search && l.employee_name && l.employee_name.toLowerCase().indexOf(search) === -1) return false;
+        if (statusFilter && l.status !== statusFilter) return false;
+        if (deptFilter && l.department !== deptFilter) return false;
         return true;
       });
       render(f);
@@ -849,30 +1123,54 @@ Pages.leaves = function(el) {
 Pages.shifts = function(el) {
   var employees = [];
   function render() {
-    var shiftCounts = {};
-    Object.keys(SHIFTS).forEach(function(s) { shiftCounts[s] = employees.filter(function(e) { return e.shift === s; }).length; });
-    var colors = { morning: { bg: 'rgba(251,191,36,0.12)', color: '#fbbf24' }, evening: { bg: 'rgba(251,146,60,0.12)', color: '#fb923c' }, night: { bg: 'rgba(129,140,248,0.12)', color: '#818cf8' } };
-    var shiftIcons = { morning: 'sun', evening: 'sunset', night: 'moon' };
+    var twoShiftCount = employees.filter(function(e) { return (e.shift_system || '3-shift') === '2-shift'; }).length;
+    var threeShiftCount = employees.filter(function(e) { return (e.shift_system || '3-shift') === '3-shift'; }).length;
+    var colors = { day: '#fbbf24', morning: '#fbbf24', evening: '#fb923c', night: '#818cf8' };
+    var shiftIcons = { day: 'sun', morning: 'sun', evening: 'sunset', night: 'moon' };
 
     var html = '<div class="stats-grid" style="margin-bottom:24px">';
-    Object.keys(SHIFTS).forEach(function(key) { html += _statCard(colors[key].color, shiftIcons[key], shiftCounts[key], SHIFTS[key].label + ' (' + SHIFTS[key].start + ' - ' + SHIFTS[key].end + ')'); });
+    html += _statCard('#6366f1', 'users', employees.length, 'Total Employees');
+    html += _statCard('#22c55e', 'clock', twoShiftCount, '2-Shift System (12h)');
+    html += _statCard('#06b6d4', 'clock', threeShiftCount, '3-Shift System (8h)');
     html += '</div>';
     html += '<div class="toolbar"><div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employees..." id="sh-search"></div>';
     html += '<select class="filter-select" id="sh-dept"><option value="">All Departments</option>'; DEPARTMENTS.forEach(function(d) { html += '<option value="' + d + '">' + d + '</option>'; }); html += '</select>';
-    html += '<select class="filter-select" id="sh-shift"><option value="">All Shifts</option>'; Object.keys(SHIFTS).forEach(function(k) { html += '<option value="' + k + '">' + SHIFTS[k].label + '</option>'; }); html += '</select></div>';
+    html += '<select class="filter-select" id="sh-system"><option value="">All Systems</option><option value="2-shift">2-Shift (12h)</option><option value="3-shift">3-Shift (8h)</option></select></div>';
 
-    html += '<div class="card"><div class="card-header"><div><h3>Shift Assignments</h3><p>' + employees.length + ' employees</p></div></div><div class="card-body no-pad"><div class="table-container"><table class="data-table"><thead><tr><th>Employee</th><th>Department</th><th>Current Shift</th><th>Hours</th><th>Actions</th></tr></thead><tbody>';
+    html += '<div class="card"><div class="card-header"><div><h3>Shift Assignments</h3><p>' + employees.length + ' employees</p></div></div><div class="card-body no-pad"><div class="table-container"><table class="data-table"><thead><tr><th>Employee</th><th>Department</th><th>Shift System</th><th>Current Shift</th><th>Hours</th><th>Change System</th><th>Change Shift</th></tr></thead><tbody>';
     employees.forEach(function(emp) {
-      html += '<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="sidebar-avatar" style="background:' + emp.avatar_color + ';width:32px;height:32px;font-size:0.7rem">' + getInitials(emp.full_name) + '</div><span style="color:var(--text-primary);font-weight:500">' + emp.full_name + '</span></div></td><td>' + emp.department + '</td>';
-      html += '<td><span class="shift-badge shift-' + emp.shift + '">' + icon('clock', 11) + ' ' + (SHIFTS[emp.shift] ? SHIFTS[emp.shift].label : '') + '</span></td>';
-      html += '<td>' + (SHIFTS[emp.shift] ? SHIFTS[emp.shift].start + ' - ' + SHIFTS[emp.shift].end : '') + '</td>';
-      html += '<td><select class="filter-select" style="padding:6px 10px" data-shift-emp="' + emp.id + '">';
-      Object.keys(SHIFTS).forEach(function(k) { html += '<option value="' + k + '"' + (emp.shift === k ? ' selected' : '') + '>' + SHIFTS[k].label + '</option>'; });
+      var sys = emp.shift_system || '3-shift';
+      var conf = getShiftConfig(emp.shift, sys);
+      html += '<tr><td><div style="display:flex;align-items:center;gap:10px"><div class="sidebar-avatar" style="background:' + (emp.avatar_color||'#6366f1') + ';width:32px;height:32px;font-size:0.7rem">' + getInitials(emp.full_name) + '</div><span style="color:var(--text-primary);font-weight:500">' + emp.full_name + '</span></div></td><td>' + emp.department + '</td>';
+      html += '<td><span class="badge badge-info" style="font-size:0.72rem">' + (sys === '2-shift' ? '2-Shift (12h)' : '3-Shift (8h)') + '</span></td>';
+      html += '<td><span class="shift-badge shift-' + emp.shift + '">' + icon('clock', 11) + ' ' + conf.label + '</span></td>';
+      html += '<td>' + conf.start + ' - ' + conf.end + ' (' + conf.hours + 'h)</td>';
+      html += '<td><select class="filter-select" style="padding:6px 10px" data-system-emp="' + emp.id + '">';
+      html += '<option value="2-shift"' + (sys === '2-shift' ? ' selected' : '') + '>2-Shift (12h)</option>';
+      html += '<option value="3-shift"' + (sys === '3-shift' ? ' selected' : '') + '>3-Shift (8h)</option>';
+      html += '</select></td>';
+      html += '<td><select class="filter-select" style="padding:6px 10px" data-shift-emp="' + emp.id + '" data-emp-system="' + sys + '">';
+      var availShifts = getShiftsForSystem(sys);
+      availShifts.forEach(function(s) { html += '<option value="' + s.key + '"' + (emp.shift === s.key ? ' selected' : '') + '>' + s.label + '</option>'; });
       html += '</select></td></tr>';
     });
     html += '</tbody></table></div></div></div>';
     el.innerHTML = html;
 
+    // Change shift system
+    document.querySelectorAll('[data-system-emp]').forEach(function(sel) {
+      sel.addEventListener('change', function() {
+        var empId = this.getAttribute('data-system-emp');
+        var newSystem = this.value;
+        var defaultShift = newSystem === '2-shift' ? 'day' : 'morning';
+        employees = employees.map(function(e) { return e.id === empId ? Object.assign({}, e, { shift_system: newSystem, shift: defaultShift }) : e; });
+        sbClient.from('users').update({ shift_system: newSystem, shift: defaultShift }).eq('id', empId).then(function(r) { if(r && r.error) { console.error("Supabase Error:", r.error); alert("DB Error: " + r.error.message); } });
+        showToast('Shift system updated!', 'success');
+        render();
+      });
+    });
+
+    // Change shift
     document.querySelectorAll('[data-shift-emp]').forEach(function(sel) {
       sel.addEventListener('change', function() {
         var empId = this.getAttribute('data-shift-emp');
@@ -884,8 +1182,19 @@ Pages.shifts = function(el) {
       });
     });
   }
-  { sbClient.from('users').select('*').eq('role', 'employee').then(function(r) { if (r.error) { alert('DB Error: ' + r.error.message + (r.error.details ? ' - ' + r.error.details : '')); console.error(r.error); }
-        if (r.data) { employees = r.data; render(); } }); }
+  { 
+    var myLevel = App.getRoleLevel(App.user ? App.user.role : 'hr');
+    var allowedRoles = [];
+    if (myLevel >= 6) allowedRoles.push('hr manager', 'hr', 'hall manager', 'department head', 'employee');
+    if (myLevel >= 5) allowedRoles.push('hr', 'hall manager', 'department head', 'employee');
+    if (myLevel >= 4) allowedRoles.push('hall manager', 'department head', 'employee');
+    if (myLevel >= 3) allowedRoles.push('department head', 'employee');
+    if (myLevel >= 2) allowedRoles.push('employee');
+    allowedRoles = allowedRoles.filter(function(item, pos) { return allowedRoles.indexOf(item) === pos; });
+
+    sbClient.from('users').select('*').in('role', allowedRoles).then(function(r) { if (r.error) { alert('DB Error: ' + r.error.message + (r.error.details ? ' - ' + r.error.details : '')); console.error(r.error); }
+        if (r.data) { employees = r.data; render(); } }); 
+  }
   render();
 };
 
@@ -893,6 +1202,9 @@ Pages.shifts = function(el) {
 Pages.overtime = function(el) {
   var isHR = App.isHR();
   var overtime = isHR ? [] : [].filter(function(o) { return o.employee_id === App.user.id; });
+
+  var search = '';
+  var statusFilter = '';
 
   function render(data) {
     var totalApproved = data.filter(function(o) { return o.status === 'approved'; }).reduce(function(s, o) { return s + o.hours; }, 0);
@@ -905,8 +1217,8 @@ Pages.overtime = function(el) {
     html += '</div>';
 
     html += '<div class="toolbar">';
-    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employee..." id="ot-search"></div>';
-    html += '<select class="filter-select" id="ot-status"><option value="">All Status</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>';
+    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employee..." id="ot-search" value="' + (search||'').replace(/"/g, '&quot;') + '"></div>';
+    html += '<select class="filter-select" id="ot-status"><option value=""' + (statusFilter===''?' selected':'') + '>All Status</option><option value="pending"' + (statusFilter==='pending'?' selected':'') + '>Pending</option><option value="approved"' + (statusFilter==='approved'?' selected':'') + '>Approved</option><option value="rejected"' + (statusFilter==='rejected'?' selected':'') + '>Rejected</option></select>';
     if (!isHR) html += '<button class="btn btn-primary" id="log-ot-btn">' + icon('plus') + ' Log Overtime</button>';
     html += '<button class="btn btn-outline" id="ot-export">' + icon('download') + ' Export</button></div>';
 
@@ -934,9 +1246,24 @@ Pages.overtime = function(el) {
     html += '</tbody></table></div></div></div>';
     el.innerHTML = html;
 
+    var searchEl = document.getElementById('ot-search');
+    if (searchEl && search) {
+      searchEl.focus();
+      searchEl.setSelectionRange(search.length, search.length);
+    }
+
     // Events
-    if (document.getElementById('ot-search')) document.getElementById('ot-search').addEventListener('input', function() { var s = this.value.toLowerCase(); render(overtime.filter(function(o) { return !s || (o.employee_name && o.employee_name.toLowerCase().indexOf(s) !== -1); })); });
-    document.getElementById('ot-status').addEventListener('change', function() { var st = this.value; render(overtime.filter(function(o) { return !st || o.status === st; })); });
+    function applyFilters() {
+      search = document.getElementById('ot-search') ? document.getElementById('ot-search').value.toLowerCase() : '';
+      statusFilter = document.getElementById('ot-status').value;
+      render(overtime.filter(function(o) {
+        if (search && o.employee_name && o.employee_name.toLowerCase().indexOf(search) === -1) return false;
+        if (statusFilter && o.status !== statusFilter) return false;
+        return true;
+      }));
+    }
+    if (document.getElementById('ot-search')) document.getElementById('ot-search').addEventListener('input', applyFilters);
+    document.getElementById('ot-status').addEventListener('change', applyFilters);
     document.getElementById('ot-export').addEventListener('click', function() { exportToCSV(data, 'overtime_report'); });
 
     if (document.getElementById('log-ot-btn')) document.getElementById('log-ot-btn').addEventListener('click', function() {
@@ -992,6 +1319,10 @@ Pages.payroll = function(el) {
   var isHR = App.isHR();
   var payroll = isHR ? [] : [].filter(function(p) { return p.employee_id === App.user.id; });
 
+  var search = '';
+  var monthFilter = '';
+  var statusFilter = '';
+
   function render(data) {
     var totalPayroll = data.reduce(function(s, p) { return s + p.net_salary; }, 0);
     var paidCount = data.filter(function(p) { return p.status === 'paid'; }).length;
@@ -1003,8 +1334,8 @@ Pages.payroll = function(el) {
     html += '</div>';
 
     html += '<div class="toolbar">';
-    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employee..." id="pay-search"></div>';
-    html += '<input type="month" class="filter-select" id="pay-month"><select class="filter-select" id="pay-status"><option value="">All Status</option><option value="paid">Paid</option><option value="processing">Processing</option></select>';
+    if (isHR) html += '<div class="search-wrapper"><span class="search-icon">' + icon('search') + '</span><input type="text" class="search-input" placeholder="Search employee..." id="pay-search" value="' + (search||'').replace(/"/g, '&quot;') + '"></div>';
+    html += '<input type="month" class="filter-select" id="pay-month" value="' + monthFilter + '"><select class="filter-select" id="pay-status"><option value=""' + (statusFilter===''?' selected':'') + '>All Status</option><option value="paid"' + (statusFilter==='paid'?' selected':'') + '>Paid</option><option value="processing"' + (statusFilter==='processing'?' selected':'') + '>Processing</option></select>';
     html += '' + (isHR ? '<button class="btn btn-primary" id="add-payroll" style="margin-right:8px">' + icon('plus') + ' Process Salary</button>' : '') + '<button class="btn btn-outline" id="pay-export">' + icon('download') + ' Export</button></div>';
 
     html += '<div class="card"><div class="card-header"><div><h3>' + (isHR ? 'Payroll Records' : 'My Salary History') + '</h3><p>' + data.length + ' records</p></div></div><div class="card-body no-pad"><div class="table-container"><table class="data-table"><thead><tr>';
@@ -1028,19 +1359,36 @@ Pages.payroll = function(el) {
     html += '</tbody></table></div></div></div>';
     el.innerHTML = html;
 
+    var searchEl = document.getElementById('pay-search');
+    if (searchEl && search) {
+      searchEl.focus();
+      searchEl.setSelectionRange(search.length, search.length);
+    }
+
     // Events
-    if (document.getElementById('pay-search')) document.getElementById('pay-search').addEventListener('input', function() { var s = this.value.toLowerCase(); render(payroll.filter(function(p) { return !s || (p.employee_name && p.employee_name.toLowerCase().indexOf(s) !== -1); })); });
-    document.getElementById('pay-month').addEventListener('change', function() { var m = this.value; render(payroll.filter(function(p) { return !m || p.month === m; })); });
-    document.getElementById('pay-status').addEventListener('change', function() { var st = this.value; render(payroll.filter(function(p) { return !st || p.status === st; })); });
+    function applyFilters() {
+      search = document.getElementById('pay-search') ? document.getElementById('pay-search').value.toLowerCase() : '';
+      monthFilter = document.getElementById('pay-month').value;
+      statusFilter = document.getElementById('pay-status').value;
+      render(payroll.filter(function(p) {
+        if (search && p.employee_name && p.employee_name.toLowerCase().indexOf(search) === -1) return false;
+        if (monthFilter && p.month !== monthFilter) return false;
+        if (statusFilter && p.status !== statusFilter) return false;
+        return true;
+      }));
+    }
+    if (document.getElementById('pay-search')) document.getElementById('pay-search').addEventListener('input', applyFilters);
+    document.getElementById('pay-month').addEventListener('change', applyFilters);
+    document.getElementById('pay-status').addEventListener('change', applyFilters);
     document.getElementById('pay-export').addEventListener('click', function() { exportToCSV(data, 'payroll_report'); });
 
     if (document.getElementById('add-payroll')) {
       document.getElementById('add-payroll').addEventListener('click', function() {
-        sbClient.from('users').select('id, full_name, base_salary, department').eq('status','active').then(function(res) {
+        sbClient.from('users').select('id, full_name, base_salary, department, insurance_active, insurance_start').eq('status','active').then(function(res) {
           var users = res.data || [];
           var monthVal = new Date().toISOString().substring(0,7);
           var b = '<div class="form-row"><div class="form-field"><label>Employee *</label><select id="pf-emp"><option value="">-- Select --</option>';
-          users.forEach(function(u) { b += '<option value="'+u.id+'" data-name="'+u.full_name+'" data-base="'+(u.base_salary||0)+'" data-dept="'+u.department+'">'+u.full_name+' - '+u.department+'</option>'; });
+          users.forEach(function(u) { b += '<option value="'+u.id+'" data-name="'+u.full_name+'" data-base="'+(u.base_salary||0)+'" data-dept="'+u.department+'" data-insured="'+(u.insurance_active ? '1' : '0')+'" data-pos="'+(u.position||'')+'">'+u.full_name+' - '+u.department+ (u.insurance_active ? '' : ' (No Insurance)') +'</option>'; });
           b += '</select></div><div class="form-field"><label>Month *</label><input type="month" id="pf-m" value="'+monthVal+'"></div></div>';
           b += '<div id="pf-calc-result" style="padding:16px;background:var(--bg-tertiary);border-radius:var(--radius-md);border:1px solid var(--border-color);margin-bottom:16px;display:none"><p style="color:var(--text-muted);text-align:center">Select an employee and click Calculate</p></div>';
           b += '<div class="form-row"><div class="form-field"><label>Extra HR Bonus (Manual)</label><input type="number" id="pf-extra-b" value="0"></div><div class="form-field"><label>Extra HR Penalty (Manual)</label><input type="number" id="pf-extra-p" value="0"></div></div>';
@@ -1054,8 +1402,9 @@ Pages.payroll = function(el) {
             var opt = sel.options[sel.selectedIndex];
             var empId = sel.value;
             var empName = opt.getAttribute('data-name');
-            var empDept = opt.getAttribute('data-dept');
+            var empDept = opt.getAttribute('data-dept') + (opt.getAttribute('data-pos').indexOf('(عامل يومية)') !== -1 ? ' (عامل يومية)' : '');
             var base = Number(opt.getAttribute('data-base')) || 0;
+            var isInsured = opt.getAttribute('data-insured') === '1';
             var month = document.getElementById('pf-m').value;
             if (!month) { alert('Select a month'); return; }
 
@@ -1075,8 +1424,12 @@ Pages.payroll = function(el) {
               var adjRecords = results[1].data || [];
               var attRecords = results[2].data || [];
 
-              // Calculate overtime pay: (base/30/8) * hours * rate
-              var hourlyRate = base / 30 / 8;
+              // Working days: 26 with insurance, 30 without
+              var workingDays = isInsured ? 26 : 30;
+              var dailyRate = base / workingDays;
+
+              // Calculate overtime pay: (base/workingDays/8) * hours * rate
+              var hourlyRate = dailyRate / 8;
               var totalOTPay = 0;
               otRecords.forEach(function(ot) { totalOTPay += hourlyRate * (ot.hours || 0) * (ot.rate || 1.5); });
               totalOTPay = Math.round(totalOTPay);
@@ -1088,17 +1441,24 @@ Pages.payroll = function(el) {
                 else totalPenalties += (adj.amount || 0);
               });
 
-              // Calculate absence deductions (30 working days - attended days)
-              var workingDays = 26; // Standard working days in a month
               var attendedDays = attRecords.length;
-              var absentDays = Math.max(0, workingDays - attendedDays);
-              var dailyRate = base / 30;
-              var absenceDeduction = Math.round(absentDays * dailyRate);
-
               var extraB = Number(document.getElementById('pf-extra-b').value) || 0;
               var extraP = Number(document.getElementById('pf-extra-p').value) || 0;
 
-              var totalEarnings = base + totalOTPay + totalBonuses + extraB;
+              var isDailyWorker = empDept.indexOf('(عامل يومية)') !== -1;
+              var absenceDeduction = 0;
+              var totalEarnings = 0;
+              var absentDays = 0;
+
+              if (isDailyWorker) {
+                totalEarnings = Math.round(dailyRate * attendedDays) + totalOTPay + totalBonuses + extraB;
+                base = Math.round(dailyRate * attendedDays); // Display base explicitly as what was realistically earned via attendance
+              } else {
+                absentDays = Math.max(0, workingDays - attendedDays);
+                absenceDeduction = Math.round(absentDays * dailyRate);
+                totalEarnings = base + totalOTPay + totalBonuses + extraB;
+              }
+
               var totalDeductions = totalPenalties + absenceDeduction + extraP;
               var net = totalEarnings - totalDeductions;
 
@@ -1112,16 +1472,28 @@ Pages.payroll = function(el) {
                 net_salary: net, status: 'processing'
               };
 
-              resultDiv.innerHTML = '<h4 style="font-weight:700;margin-bottom:12px;font-size:0.9rem">📊 Salary Breakdown - ' + empName + '</h4>' +
+              // Build cumulative daily salary breakdown
+              var cumulativeHtml = '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border-color)"><h4 style="font-weight:700;font-size:0.8rem;margin-bottom:8px">📅 Cumulative Daily Earnings (÷' + workingDays + ' days' + (isInsured ? ', with insurance' : ', no insurance') + ')</h4>';
+              cumulativeHtml += '<div style="max-height:180px;overflow-y:auto;font-size:0.78rem">';
+              for (var d = 1; d <= Math.min(attendedDays, workingDays); d++) {
+                var cumAmount = Math.round(dailyRate * d);
+                var barWidth = Math.round((d / workingDays) * 100);
+                cumulativeHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><span style="min-width:55px;color:var(--text-muted)">Day ' + d + '</span><div style="flex:1;background:var(--bg-secondary);border-radius:4px;height:18px;overflow:hidden"><div style="width:' + barWidth + '%;height:100%;background:linear-gradient(90deg,#6366f1,#818cf8);border-radius:4px"></div></div><span style="min-width:85px;text-align:right;font-weight:600">EGP ' + cumAmount.toLocaleString() + '</span></div>';
+              }
+              cumulativeHtml += '</div></div>';
+
+              resultDiv.innerHTML = '<h4 style="font-weight:700;margin-bottom:12px;font-size:0.9rem">📊 Salary Breakdown - ' + empName + (isInsured ? '' : ' 🚫 No Insurance') + '</h4>' +
                 '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.85rem">' +
                 '<div style="color:var(--text-secondary)">Base Salary:</div><div style="font-weight:600">EGP ' + base.toLocaleString() + '</div>' +
+                '<div style="color:var(--text-secondary)">Salary Division:</div><div style="font-weight:600">÷ ' + workingDays + ' days = EGP ' + Math.round(dailyRate).toLocaleString() + '/day</div>' +
                 '<div style="color:var(--accent-success)">Overtime (' + otRecords.length + ' records):</div><div style="font-weight:600;color:var(--accent-success)">+EGP ' + totalOTPay.toLocaleString() + '</div>' +
                 '<div style="color:var(--accent-info)">Bonuses (' + adjRecords.filter(function(a){return a.type==="bonus"}).length + ' approved):</div><div style="font-weight:600;color:var(--accent-info)">+EGP ' + (totalBonuses + extraB).toLocaleString() + '</div>' +
                 '<div style="color:var(--accent-danger)">Penalties:</div><div style="font-weight:600;color:var(--accent-danger)">-EGP ' + (totalPenalties + extraP).toLocaleString() + '</div>' +
                 '<div style="color:var(--accent-danger)">Absence (' + absentDays + ' days):</div><div style="font-weight:600;color:var(--accent-danger)">-EGP ' + absenceDeduction.toLocaleString() + '</div>' +
                 '<div style="color:var(--text-secondary)">Attended Days:</div><div style="font-weight:600">' + attendedDays + ' / ' + workingDays + '</div>' +
                 '</div>' +
-                '<div style="border-top:2px solid var(--accent-primary);margin-top:12px;padding-top:12px;display:flex;justify-content:space-between;align-items:center"><span style="font-weight:800;font-size:1rem">NET SALARY</span><span style="font-weight:900;font-size:1.3rem;color:var(--accent-primary-hover)">EGP ' + net.toLocaleString() + '</span></div>';
+                '<div style="border-top:2px solid var(--accent-primary);margin-top:12px;padding-top:12px;display:flex;justify-content:space-between;align-items:center"><span style="font-weight:800;font-size:1rem">NET SALARY</span><span style="font-weight:900;font-size:1.3rem;color:var(--accent-primary-hover)">EGP ' + net.toLocaleString() + '</span></div>' +
+                cumulativeHtml;
 
               document.getElementById('pf-save').removeAttribute('disabled');
             });
@@ -1332,8 +1704,9 @@ Pages.auditLog = function(el) {
   }
 
   {
-    sbClient.from('audit_log').select('*').order('created_at', { ascending: false }).then(function(r) {
-      if (r.data) { logs = r.data.map(function(l) { return Object.assign({}, l, { user: l.user_name, timestamp: l.created_at || l.timestamp, ip: '127.0.0.1' }); }); actionTypes = []; logs.forEach(function(l) { if (actionTypes.indexOf(l.action) === -1) actionTypes.push(l.action); }); render(logs); }
+    sbClient.from('audit_log').select('*').order('timestamp', { ascending: false }).then(function(r) {
+      if (r.error) { console.error('Audit Load Error:', r.error); el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--accent-danger)">Error loading audit log: ' + r.error.message + '</div>'; return; }
+      if (r.data) { logs = r.data.map(function(l) { return Object.assign({}, l, { user: l.user_name, timestamp: l.timestamp, ip: l.ip || '127.0.0.1' }); }); actionTypes = []; logs.forEach(function(l) { if (actionTypes.indexOf(l.action) === -1) actionTypes.push(l.action); }); render(logs); }
     });
   }
   render(logs);
@@ -1436,7 +1809,16 @@ Pages.hrAdjustments = function(el) {
       html += '<td><span class="badge ' + statusClass + '"><span class="badge-dot"></span>' + a.status + '</span></td>';
       html += '<td>';
       if (a.status === 'pending') {
-        html += '<div style="display:flex;gap:4px"><button class="btn btn-success btn-xs" data-adj-approve="' + a.id + '">Approve</button><button class="btn btn-xs" style="background:var(--accent-danger);color:#fff" data-adj-reject="' + a.id + '">Reject</button></div>';
+        var canApprove = true;
+        if (App.user.role === 'hr') {
+          var perms = App.user.permissions || {};
+          if (!perms.can_adjust_salary) canApprove = false;
+        }
+        if (canApprove) {
+          html += '<div style="display:flex;gap:4px"><button class="btn btn-success btn-xs" data-adj-approve="' + a.id + '">Approve</button><button class="btn btn-xs" style="background:var(--accent-danger);color:#fff" data-adj-reject="' + a.id + '">Reject</button></div>';
+        } else {
+          html += '<span style="color:var(--accent-danger);font-size:0.75rem">Blocked (No Roles Perm)</span>';
+        }
       } else { html += '<span style="color:var(--text-muted);font-size:0.78rem">Done</span>'; }
       html += '</td></tr>';
     });
@@ -1476,6 +1858,7 @@ Pages.hrAdjustments = function(el) {
   }
 
   sbClient.from('salary_adjustments').select('*').order('created_at', { ascending: false }).then(function(r) {
+    if (r.error) { alert('DB Error: ' + r.error.message); el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--accent-danger)">Error loading adjustments</div>'; console.error(r.error); return; }
     if (r.data) { adjustments = r.data; render(); }
   });
   el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading adjustments...</div>';
@@ -1488,3 +1871,4 @@ function _statCard(color, iconName, value, label, trendHtml) {
 
 // ========== START APP ==========
 document.addEventListener('DOMContentLoaded', function() { App.init(); });
+
